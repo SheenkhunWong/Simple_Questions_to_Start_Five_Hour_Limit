@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
+<title>问题表 · 复制与折叠</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <style>
   :root {
@@ -164,7 +165,7 @@
     cursor: pointer;
     transition: background .15s, border-color .15s, color .15s;
   }
-  .copy:hover { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .copy:hover { background: var(--accent-hover); border-color: var(--accent); color: #fff; }
   .copy:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
   .copy.done {
     background: var(--green-soft);
@@ -211,6 +212,48 @@
     tbody td.c-a { text-align: left; padding-top: 10px; width: auto !important; }
     .copy { height: 40px; min-width: 76px; font-size: 14px; }
   }
+
+  /* 折叠只改变可见状态，DATA 的顺序与序号始终不变。 */
+  :root { --text-soft: #69665f; }
+  .app > .controls, .fold-tools { flex-shrink: 0; }
+  .panel { min-height: 0; }
+  .copy, .action { min-height: 44px; font-size: 14px; }
+  tbody td.c-n, .count, .tag, thead th { font-size: 14px; }
+  .fold-tools { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  .fold-bar { display: flex; gap: 8px; align-items: center; padding: 8px 12px; flex-wrap: wrap; }
+  .fold-toggle { flex: 1; text-align: left; border: 0 !important; background: transparent !important; min-width: 150px; }
+  .action { font-family: inherit; line-height: 1.4; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 7px; background: var(--surface); color: var(--text-mid); cursor: pointer; }
+  .action:hover:not(:disabled) { background: var(--surface-soft); border-color: var(--accent); }
+  .action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .action:disabled { opacity: .55; cursor: not-allowed; }
+  .fold-toggle::before { content: ""; display: inline-block; margin-right: 10px; border-left: 6px solid currentColor; border-top: 4px solid transparent; border-bottom: 4px solid transparent; transition: transform .15s; }
+  .fold-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+  .fold-hint { margin: 0; padding: 0 16px 8px; font-size: 14px; color: var(--text-soft); }
+  .fold-list { list-style: none; margin: 0; padding: 0 12px; max-height: min(220px, 27vh); overflow: auto; border-top: 1px solid var(--border); }
+  .fold-item { display: flex; gap: 12px; align-items: center; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+  .fold-item:last-child { border-bottom: 0; }
+  .fold-label { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 14px; }
+  .fold-number { color: var(--text-soft); font-variant-numeric: tabular-nums; margin-right: 8px; }
+  .fold-item .action { flex-shrink: 0; }
+  tbody tr { cursor: pointer; }
+  .scroller { overflow-anchor: none; }
+  [hidden] { display: none !important; }
+  @media (max-width: 860px) {
+    .controls { gap: 8px; margin-bottom: 8px; }
+    .search { min-width: 0; flex-basis: 100%; }
+    .fold-bar { padding: 6px 8px; }
+    .fold-hint { padding: 0 12px 8px; }
+    .copy { height: 44px; }
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #191919; --surface: #202020; --surface-soft: #30302e; --border: #484844; --border-strong: #77746e; --text: #faf9f5; --text-mid: #e0ddd5; --text-soft: #b5b1a8; --accent: #efaa8e; --accent-hover: #efaa8e; --accent-soft: #48362e; }
+    tbody td, tbody tr { border-bottom-color: var(--border); }
+    tbody tr:hover td { background: #30302e; }
+    .copy:hover { color: #191919; }
+    mark { background: #674d2e; }
+    @media (max-width: 860px) { tbody tr:hover td { background: transparent; } }
+  }
+
 </style>
 </head>
 <body>
@@ -223,6 +266,15 @@
     <select id="dom" aria-label="按领域筛选"></select>
     <span class="count" id="count" aria-live="polite"></span>
   </div>
+
+  <section class="fold-tools" aria-label="折叠管理">
+    <div class="fold-bar">
+      <button id="foldToggle" class="action fold-toggle" type="button" aria-expanded="false" aria-controls="foldList">已折叠 0 条</button>
+      <button id="undoFold" class="action" type="button" disabled>撤销上次折叠</button>
+    </div>
+    <p class="fold-hint">点击条目或复制按钮，复制成功即向上收起；恢复后原顺序、原序号不变。<span id="saveStatus" role="status">折叠状态自动保存在当前浏览器。</span></p>
+    <ul id="foldList" class="fold-list" aria-label="已折叠条目，可逐项取消折叠" hidden></ul>
+  </section>
 
   <div class="panel">
     <div class="scroller" id="scroller">
@@ -278,47 +330,148 @@ function hl(s, term) {
   return t.replace(new RegExp(safe, "gi"), function (m) { return "<mark>" + m + "</mark>"; });
 }
 
+// 用原始序号标识状态；从不重新排列或重新编号 DATA。
+const folded = new Set();
+const foldHistory = [];
+const pending = new Set();
+const byNumber = new Map(DATA.map(r => [r.n, r]));
+const foldToggle = document.getElementById("foldToggle");
+const foldList = document.getElementById("foldList");
+const undoFold = document.getElementById("undoFold");
 let shown = [];
+let listOpen = false;
 
-function render() {
-  const term = qEl.value.trim();
-  const low = term.toLowerCase();
-  const dom = domEl.value;
-
-  shown = DATA.filter(function (r) {
-    if (dom && r.d !== dom) return false;
-    if (!low) return true;
-    return (
-      r.z.toLowerCase().indexOf(low) > -1 ||
-      r.e.toLowerCase().indexOf(low) > -1 ||
-      r.d.toLowerCase().indexOf(low) > -1 ||
-      String(r.n) === low
-    );
-  });
-
-  countEl.textContent = "显示 " + shown.length + " / " + DATA.length + " 条";
-  emptyEl.hidden = shown.length > 0;
-
-  const html = shown.map(function (r, i) {
-    return (
-      '<tr>' +
-      '<td class="c-n">' + r.n + "</td>" +
-      '<td class="c-d"><span class="tag">' + hl(r.d, term) + "</span></td>" +
-      '<td class="c-z">' + hl(r.z, term) + "</td>" +
-      '<td class="c-e">' + hl(r.e, term) + "</td>" +
-      '<td class="c-a"><button class="copy" type="button" data-i="' + i +
-      '" aria-label="复制第 ' + r.n + ' 题英文问题">复制</button></td>' +
-      "</tr>"
-    );
-  }).join("");
-
-  tb.innerHTML = html;
-  scroller.scrollTop = 0;
+// 同一题库使用稳定的存储键；仅保存序号与撤销记录，不改动题库。
+const STORAGE_KEY = "question-table-folds-v1-6e545cb947dd43fb";
+const saveStatus = document.getElementById("saveStatus");
+function storageWarning() {
+  saveStatus.textContent = "当前浏览器无法保存状态；关闭后可能丢失。请使用普通浏览器窗口并允许本地存储。";
+  saveStatus.style.color = "var(--accent)";
 }
+function loadFoldState() {
+  let raw;
+  try { raw = localStorage.getItem(STORAGE_KEY); }
+  catch (error) { storageWarning(); return; }
+  if (!raw) return;
+  try {
+    const state = JSON.parse(raw);
+    if (!state || state.version !== 1 || !Array.isArray(state.folded)) return;
+    for (const n of state.folded) {
+      if (Number.isInteger(n) && byNumber.has(n)) folded.add(n);
+    }
+    if (Array.isArray(state.history)) {
+      for (const n of state.history) {
+        if (folded.has(n) && !foldHistory.includes(n)) foldHistory.push(n);
+      }
+    }
+    listOpen = state.listOpen === true;
+  } catch (error) {
+    // 损坏的存储不影响工具运行；下一次操作会写入有效状态。
+    saveStatus.textContent = "上次保存的状态无法读取；本次操作将重新保存。";
+  }
+}
+function saveFoldState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      version: 1, folded: [...folded], history: [...foldHistory], listOpen
+    }));
+    saveStatus.textContent = "折叠状态已自动保存在当前浏览器。";
+    saveStatus.style.color = "";
+  } catch (error) { storageWarning(); }
+}
+loadFoldState();
+
+function matches(r) {
+  const low = qEl.value.trim().toLowerCase();
+  if (domEl.value && r.d !== domEl.value) return false;
+  return !low || r.z.toLowerCase().includes(low) ||
+    r.e.toLowerCase().includes(low) || r.d.toLowerCase().includes(low) || String(r.n) === low;
+}
+
+function renderFolded() {
+  foldToggle.textContent = "已折叠 " + folded.size + " 条";
+  foldToggle.setAttribute("aria-expanded", String(listOpen));
+  foldList.hidden = !listOpen;
+  undoFold.disabled = foldHistory.length === 0;
+  foldList.innerHTML = DATA.filter(r => folded.has(r.n)).map(r =>
+    '<li class="fold-item"><span class="fold-label"><span class="fold-number">#' + r.n +
+    '</span>' + esc(r.z) + '</span><button class="action" type="button" data-restore="' + r.n +
+    '" aria-label="取消折叠第 ' + r.n + ' 题">取消折叠</button></li>'
+  ).join("") || '<li class="fold-item"><span class="fold-label">暂无已折叠条目。</span></li>';
+}
+
+function render(resetScroll = true) {
+  const oldTop = scroller.scrollTop;
+  // 锚定当前视口中的第一个未折叠条目，避免操作长表时跳回顶部。
+  let anchor = null;
+  if (!resetScroll) {
+    const edge = scroller.getBoundingClientRect().top;
+    const headerHeight = scroller.querySelector('thead').getBoundingClientRect().height;
+    for (const tr of tb.children) {
+      const rect = tr.getBoundingClientRect();
+      if (!folded.has(Number(tr.dataset.n)) && rect.bottom > edge + headerHeight) {
+        anchor = { n: tr.dataset.n, offset: rect.top - edge }; break;
+      }
+    }
+  }
+  const term = qEl.value.trim();
+  const matched = DATA.filter(matches);
+  shown = matched.filter(r => !folded.has(r.n));
+  countEl.textContent = "待复制 " + shown.length + " / " + matched.length + " 条 · 已折叠 " + folded.size;
+  emptyEl.hidden = shown.length > 0;
+  emptyEl.textContent = matched.length ? "当前匹配条目已全部折叠，可撤销或逐项取消折叠。" : "没有匹配的问题，换个关键词试试。";
+  tb.innerHTML = shown.map(r =>
+    '<tr data-n="' + r.n + '" title="点击复制英文问题并折叠">' +
+    '<td class="c-n">' + r.n + '</td>' +
+    '<td class="c-d"><span class="tag">' + hl(r.d, term) + '</span></td>' +
+    '<td class="c-z">' + hl(r.z, term) + '</td>' +
+    '<td class="c-e">' + hl(r.e, term) + '</td>' +
+    '<td class="c-a"><button class="copy" type="button" data-n="' + r.n +
+    '" aria-label="复制第 ' + r.n + ' 题英文问题并折叠"' + (pending.has(r.n) ? ' disabled' : '') + '>' +
+    (pending.has(r.n) ? '复制中' : '复制') + '</button></td></tr>'
+  ).join("");
+  renderFolded();
+  if (resetScroll) scroller.scrollTop = 0;
+  else {
+    scroller.scrollTop = oldTop;
+    const tr = anchor && tb.querySelector('tr[data-n="' + anchor.n + '"]');
+    if (tr) scroller.scrollTop += tr.getBoundingClientRect().top - scroller.getBoundingClientRect().top - anchor.offset;
+  }
+}
+
+function restore(n, undo = false) {
+  if (!folded.delete(n)) return;
+  // 手动恢复也移除对应撤销记录，避免撤销到已恢复项。
+  for (let i = foldHistory.length - 1; i >= 0; i--) {
+    if (foldHistory[i] === n) foldHistory.splice(i, 1);
+  }
+  saveFoldState();
+  const visible = matches(byNumber.get(n));
+  render(false);
+  showToast((undo ? "已撤销折叠：第 " : "已取消折叠：第 ") + n + " 题，已恢复原位置" + (visible ? "。" : "；当前筛选未显示此条目。"));
+}
+foldToggle.addEventListener("click", () => {
+  listOpen = !listOpen;
+  saveFoldState();
+  renderFolded();
+});
+undoFold.addEventListener("click", () => {
+  if (foldHistory.length) restore(foldHistory[foldHistory.length - 1], true);
+});
+foldList.addEventListener("click", e => {
+  const btn = e.target.closest("button[data-restore]");
+  if (!btn) return;
+  const n = Number(btn.dataset.restore);
+  const items = Array.from(foldList.querySelectorAll("button"));
+  const index = items.indexOf(btn);
+  restore(n);
+  const next = foldList.querySelectorAll("button");
+  (next[Math.min(index, next.length - 1)] || foldToggle).focus({ preventScroll: true });
+});
 
 let toastTimer;
 function showToast(text) {
-  toast.innerHTML = "已复制：<b>" + esc(text) + "</b>";
+  toast.textContent = text;
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(function () { toast.classList.remove("show"); }, 2200);
@@ -342,32 +495,46 @@ function copyText(text) {
   });
 }
 
-tb.addEventListener("click", function (e) {
-  const btn = e.target.closest("button.copy");
-  if (!btn) return;
-  const row = shown[Number(btn.dataset.i)];
-  if (!row) return;
+tb.addEventListener("click", async function (e) {
+  const tr = e.target.closest("tr[data-n]");
+  if (!tr || (!e.target.closest('button') && window.getSelection().toString())) return;
+  const n = Number(tr.dataset.n);
+  const row = byNumber.get(n);
+  if (!row || folded.has(n) || pending.has(n)) return;
+  const btn = tr.querySelector("button.copy");
+  const keyboardFocus = document.activeElement === btn;
+  const nextNumber = tr.nextElementSibling?.dataset.n || tr.previousElementSibling?.dataset.n;
   const text = row.e + SUFFIX;
-  copyText(text).then(function () {
-    btn.textContent = "已复制";
-    btn.classList.add("done");
-    setTimeout(function () {
-      btn.textContent = "复制";
-      btn.classList.remove("done");
-    }, 1400);
-    showToast(text);
-  }).catch(function () {
-    btn.textContent = "失败";
-    setTimeout(function () { btn.textContent = "复制"; }, 1400);
-  });
+  pending.add(n);
+  btn.disabled = true;
+  btn.textContent = "复制中";
+  try {
+    await copyText(text);
+    folded.add(n);
+    foldHistory.push(n);
+    saveFoldState();
+    pending.delete(n);
+    // 成功后立即移出可见表格，下方条目上移；不追加到表尾。
+    render(false);
+    if (keyboardFocus) {
+      const nextButton = nextNumber && tb.querySelector('button[data-n="' + nextNumber + '"]');
+      (nextButton || undoFold).focus({ preventScroll: true });
+    }
+    showToast("已复制并折叠第 " + n + " 题，可撤销。");
+  } catch (error) {
+    pending.delete(n);
+    const current = tb.querySelector('button[data-n="' + n + '"]');
+    if (current) { current.disabled = false; current.textContent = "复制"; }
+    showToast("复制失败，条目未折叠。请检查浏览器剪贴板权限后重试。");
+  }
 });
 
 let t;
 qEl.addEventListener("input", function () {
   clearTimeout(t);
-  t = setTimeout(render, 120);
+  t = setTimeout(() => render(true), 120);
 });
-domEl.addEventListener("change", render);
+domEl.addEventListener("change", () => render(true));
 
 render();
 </script>
